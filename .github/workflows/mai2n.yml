@@ -1,0 +1,9 @@
+# .github/workflows/test-fetch.yml
+name: Test GAG2 fetch
+on: workflow_dispatch
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Curl test
+        run: curl -s -o /dev/null -w "%{http_code}\n" https://growagarden2.fandom.com/wiki/Pets

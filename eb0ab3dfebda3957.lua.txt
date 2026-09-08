@@ -5,7 +5,7 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild('PlayerGui')
 local TOTAL_TASKS = 8
 local CHALLENGE_COUNT = 6
-local ARTIFICIAL_FAIL_CHANCE = 0.55
+local ARTIFICIAL_FAIL_CHANCE = 0.33
 local FIRST_CHECK_FAIL_CHANCE = 0.7
 local SCAN_LINES = {
     '[AntiCheat] Initializing scan module...',

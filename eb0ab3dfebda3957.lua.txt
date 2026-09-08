@@ -1,0 +1,1672 @@
+local Players = game:GetService('Players')
+local TweenService = game:GetService('TweenService')
+local UserInputService = game:GetService('UserInputService')
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild('PlayerGui')
+local TOTAL_TASKS = 8
+local CHALLENGE_COUNT = 6
+local ARTIFICIAL_FAIL_CHANCE = 0.55
+local FIRST_CHECK_FAIL_CHANCE = 0.7
+local SCAN_LINES = {
+    '[AntiCheat] Initializing scan module...',
+    '[AntiCheat] Scanning process memory...',
+    '[AntiCheat] Checking for known hook signatures...',
+    '[AntiCheat] Verifying script integrity...',
+    '[AntiCheat] Checking executor environment...',
+    '[AntiCheat] Cross-referencing session token...',
+    '[AntiCheat] Validating render pipeline hooks...',
+    '[AntiCheat] Finalizing integrity report...',
+}
+local MINOR_WARNINGS = {
+    '[AntiCheat] WARNING: minor anomaly detected, continuing scan...',
+    '[AntiCheat] WARNING: unexpected memory access, logging event...',
+    '[AntiCheat] WARNING: timing irregularity detected, monitoring...',
+}
+local MAX_SCAN_RETRIES = 3
+local SCAN_RETRY_CHANCE = 0.55
+local KEY_CHARSET = 'AaBbCcDdEeFf0O1IlGgHhJjKkLlMmNnPpQqRrSsTtUuVvWwXxYyZz23456789'
+local MEMORY_CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+local STROOP_COLORS = {
+    {
+        name = 'RED',
+        color = Color3.fromRGB(220, 70, 70),
+    },
+    {
+        name = 'BLUE',
+        color = Color3.fromRGB(70, 120, 220),
+    },
+    {
+        name = 'GREEN',
+        color = Color3.fromRGB(70, 170, 100),
+    },
+    {
+        name = 'YELLOW',
+        color = Color3.fromRGB(225, 190, 50),
+    },
+    {
+        name = 'PURPLE',
+        color = Color3.fromRGB(150, 90, 200),
+    },
+    {
+        name = 'ORANGE',
+        color = Color3.fromRGB(230, 140, 50),
+    },
+}
+local ARROW_SYMBOLS = {"↑", "↓", "←", "→"}
+local gui = Instance.new('ScreenGui')
+
+gui.Name = 'SecureCheck'
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 999
+gui.Parent = playerGui
+
+local RunService = game:GetService('RunService')
+local char = player.Character or player.CharacterAdded:Wait()
+local cam = workspace.CurrentCamera
+local _savedCamType = cam.CameraType
+local _frozenCF = cam.CFrame
+local _charClone = nil
+local _loaderActive = true
+
+pcall(function()
+    char.Archivable = true
+    _charClone = char:Clone()
+    char.Archivable = false
+    _charClone.Name = '__verify_snap'
+
+    for _, p in ipairs(_charClone:GetDescendants())do
+        if p:IsA('BasePart') then
+            p.CanCollide = false
+            p.CastShadow = false
+            p.Anchored = (p.Name == 'HumanoidRootPart')
+        end
+        if p:IsA('Script') or p:IsA('LocalScript') then
+            p:Destroy()
+        end
+    end
+
+    local cloneHum = _charClone:FindFirstChildOfClass('Humanoid')
+
+    if cloneHum then
+        cloneHum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+        cloneHum.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+    end
+
+    local cloneRoot = _charClone:FindFirstChild('HumanoidRootPart')
+    local realRoot = char:FindFirstChild('HumanoidRootPart')
+
+    if cloneRoot and realRoot then
+        cloneRoot.CFrame = realRoot.CFrame
+    end
+
+    _charClone.Parent = workspace
+
+    task.spawn(function()
+        task.wait(0.5)
+
+        local realHum = char:FindFirstChildOfClass('Humanoid')
+        local realAnim = realHum and realHum:FindFirstChildOfClass('Animator')
+        local cloneAnim = cloneHum and (cloneHum:FindFirstChildOfClass('Animator') or Instance.new('Animator', cloneHum))
+
+        if realAnim and cloneAnim then
+            for _, track in ipairs(realAnim:GetPlayingAnimationTracks())do
+                pcall(function()
+                    local t = cloneAnim:LoadAnimation(track.Animation)
+
+                    t.Looped = true
+
+                    t:Play()
+
+                    t.TimePosition = track.TimePosition
+                end)
+            end
+        end
+    end)
+
+    cam.CameraType = Enum.CameraType.Scriptable
+    _frozenCF = cam.CFrame
+end)
+
+local function _restoreAll()
+    pcall(function()
+        cam.CameraType = _savedCamType
+
+        if _charClone then
+            _charClone:Destroy()
+
+            _charClone = nil
+        end
+
+        local currentChar = player.Character
+
+        if currentChar then
+            for _, p in ipairs(currentChar:GetDescendants())do
+                if p:IsA('BasePart') or p:IsA('Decal') then
+                    p.LocalTransparencyModifier = 0
+                    p.Transparency = 0
+                end
+            end
+        end
+    end)
+end
+
+local _camConn
+
+_camConn = RunService.RenderStepped:Connect(function()
+    if not gui.Parent then
+        _loaderActive = false
+
+        _restoreAll()
+        _camConn:Disconnect()
+
+        return
+    end
+    if not _loaderActive then
+        return
+    end
+
+    local currentChar = player.Character
+
+    if currentChar then
+        for _, p in ipairs(currentChar:GetDescendants())do
+            if p:IsA('BasePart') or p:IsA('Decal') then
+                p.Transparency = 1
+            end
+        end
+    end
+
+    cam.CameraType = Enum.CameraType.Scriptable
+    cam.CFrame = _frozenCF
+end)
+
+local overlay = Instance.new('Frame')
+
+overlay.Size = UDim2.fromScale(1, 1)
+overlay.BackgroundColor3 = Color3.new(0, 0, 0)
+overlay.BackgroundTransparency = 0.45
+overlay.BorderSizePixel = 0
+overlay.Active = true
+overlay.Parent = gui
+
+local card = Instance.new('Frame')
+
+card.Size = UDim2.fromOffset(300, 200)
+card.AnchorPoint = Vector2.new(0.5, 0.5)
+card.Position = UDim2.fromScale(0.5, 0.5)
+card.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+card.BorderSizePixel = 0
+card.Parent = overlay
+Instance.new('UICorner', card).CornerRadius = UDim.new(0, 10)
+
+local cardStroke = Instance.new('UIStroke', card)
+
+cardStroke.Color = Color3.fromRGB(200, 200, 200)
+cardStroke.Thickness = 1
+
+local title = Instance.new('TextLabel')
+
+title.Size = UDim2.new(1, -20, 0, 22)
+title.Position = UDim2.new(0, 10, 0, 12)
+title.BackgroundTransparency = 1
+title.Text = 'Security Verification'
+title.Font = Enum.Font.GothamBold
+title.TextSize = 15
+title.TextColor3 = Color3.fromRGB(40, 40, 40)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = card
+
+local subtitle = Instance.new('TextLabel')
+
+subtitle.Size = UDim2.new(1, -20, 0, 16)
+subtitle.Position = UDim2.new(0, 10, 0, 34)
+subtitle.BackgroundTransparency = 1
+subtitle.Text = 'Verify you are human to continue'
+subtitle.Font = Enum.Font.Gotham
+subtitle.TextSize = 11
+subtitle.TextColor3 = Color3.fromRGB(120, 120, 120)
+subtitle.TextXAlignment = Enum.TextXAlignment.Left
+subtitle.Parent = card
+
+local checkFrame = Instance.new('Frame')
+
+checkFrame.Size = UDim2.fromOffset(260, 44)
+checkFrame.AnchorPoint = Vector2.new(0.5, 0)
+checkFrame.Position = UDim2.new(0.5, 0, 0, 60)
+checkFrame.BackgroundColor3 = Color3.fromRGB(250, 250, 250)
+checkFrame.BorderSizePixel = 0
+checkFrame.Parent = card
+Instance.new('UICorner', checkFrame).CornerRadius = UDim.new(0, 6)
+
+local checkStroke = Instance.new('UIStroke', checkFrame)
+
+checkStroke.Color = Color3.fromRGB(210, 210, 210)
+
+local checkbox = Instance.new('TextButton')
+
+checkbox.Size = UDim2.fromOffset(22, 22)
+checkbox.Position = UDim2.new(0, 11, 0.5, -11)
+checkbox.BackgroundColor3 = Color3.new(1, 1, 1)
+checkbox.Text = ''
+checkbox.Font = Enum.Font.GothamBold
+checkbox.TextSize = 14
+checkbox.Parent = checkFrame
+Instance.new('UICorner', checkbox).CornerRadius = UDim.new(0, 4)
+
+local cbStroke = Instance.new('UIStroke', checkbox)
+
+cbStroke.Color = Color3.fromRGB(180, 180, 180)
+cbStroke.Thickness = 1.5
+
+local spinner = Instance.new('Frame')
+
+spinner.Size = UDim2.fromOffset(16, 16)
+spinner.AnchorPoint = Vector2.new(0.5, 0.5)
+spinner.Position = UDim2.fromScale(0.5, 0.5)
+spinner.BackgroundTransparency = 1
+spinner.Visible = false
+spinner.Parent = checkbox
+Instance.new('UICorner', spinner).CornerRadius = UDim.new(1, 0)
+
+local ringStroke = Instance.new('UIStroke', spinner)
+
+ringStroke.Thickness = 2
+ringStroke.Color = Color3.fromRGB(70, 130, 220)
+
+local ringGradient = Instance.new('UIGradient')
+
+ringGradient.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0),
+    NumberSequenceKeypoint.new(0.8, 0.85),
+    NumberSequenceKeypoint.new(1, 1),
+})
+ringGradient.Parent = ringStroke
+
+local checkLabel = Instance.new('TextLabel')
+
+checkLabel.Size = UDim2.new(1, -46, 1, 0)
+checkLabel.Position = UDim2.new(0, 42, 0, 0)
+checkLabel.BackgroundTransparency = 1
+checkLabel.Text = "I'm not a robot"
+checkLabel.Font = Enum.Font.Gotham
+checkLabel.TextSize = 12
+checkLabel.TextColor3 = Color3.fromRGB(60, 60, 60)
+checkLabel.TextXAlignment = Enum.TextXAlignment.Left
+checkLabel.Parent = checkFrame
+
+local footer = Instance.new('TextLabel')
+
+footer.Size = UDim2.new(1, -20, 0, 84)
+footer.Position = UDim2.new(0, 10, 0, 112)
+footer.BackgroundTransparency = 1
+footer.Text = 'This verification step helps protect this script from automated bots and abusive scripts that could compromise its stability or put your account at risk.'
+footer.Font = Enum.Font.Gotham
+footer.TextSize = 13
+footer.TextColor3 = Color3.fromRGB(150, 150, 150)
+footer.TextWrapped = true
+footer.TextXAlignment = Enum.TextXAlignment.Left
+footer.TextYAlignment = Enum.TextYAlignment.Top
+footer.Parent = card
+
+local scanConsole = Instance.new('Frame')
+
+scanConsole.Size = UDim2.new(1, -20, 0, 130)
+scanConsole.Position = UDim2.new(0, 10, 0, 60)
+scanConsole.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+scanConsole.BorderSizePixel = 0
+scanConsole.Visible = false
+scanConsole.Parent = card
+Instance.new('UICorner', scanConsole).CornerRadius = UDim.new(0, 6)
+
+local consoleText = Instance.new('TextLabel')
+
+consoleText.Size = UDim2.new(1, -12, 1, -12)
+consoleText.Position = UDim2.new(0, 6, 0, 6)
+consoleText.BackgroundTransparency = 1
+consoleText.Text = ''
+consoleText.Font = Enum.Font.Code
+consoleText.TextSize = 11
+consoleText.TextColor3 = Color3.fromRGB(90, 230, 140)
+consoleText.TextWrapped = true
+consoleText.TextXAlignment = Enum.TextXAlignment.Left
+consoleText.TextYAlignment = Enum.TextYAlignment.Top
+consoleText.Parent = scanConsole
+
+local keyFrame = Instance.new('Frame')
+
+keyFrame.Size = UDim2.new(1, -20, 0, 130)
+keyFrame.Position = UDim2.new(0, 10, 0, 60)
+keyFrame.BackgroundTransparency = 1
+keyFrame.Visible = false
+keyFrame.Parent = card
+
+local keyPrompt = Instance.new('TextLabel')
+
+keyPrompt.Size = UDim2.new(1, 0, 0, 16)
+keyPrompt.BackgroundTransparency = 1
+keyPrompt.Text = 'Type the key below to continue:'
+keyPrompt.Font = Enum.Font.Gotham
+keyPrompt.TextSize = 11
+keyPrompt.TextColor3 = Color3.fromRGB(120, 120, 120)
+keyPrompt.TextXAlignment = Enum.TextXAlignment.Left
+keyPrompt.Parent = keyFrame
+
+local keyDisplay = Instance.new('TextLabel')
+
+keyDisplay.Size = UDim2.new(1, 0, 0, 28)
+keyDisplay.Position = UDim2.new(0, 0, 0, 20)
+keyDisplay.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+keyDisplay.Text = ''
+keyDisplay.Font = Enum.Font.Code
+keyDisplay.TextSize = 16
+keyDisplay.TextColor3 = Color3.fromRGB(30, 30, 30)
+keyDisplay.Parent = keyFrame
+Instance.new('UICorner', keyDisplay).CornerRadius = UDim.new(0, 6)
+
+local keyDisplayStroke = Instance.new('UIStroke', keyDisplay)
+
+keyDisplayStroke.Color = Color3.fromRGB(210, 210, 210)
+
+local keyInput = Instance.new('TextBox')
+
+keyInput.Size = UDim2.new(1, 0, 0, 30)
+keyInput.Position = UDim2.new(0, 0, 0, 56)
+keyInput.BackgroundColor3 = Color3.new(1, 1, 1)
+keyInput.PlaceholderText = 'Type key here'
+keyInput.Text = ''
+keyInput.ClearTextOnFocus = false
+keyInput.Font = Enum.Font.Code
+keyInput.TextSize = 14
+keyInput.TextColor3 = Color3.fromRGB(30, 30, 30)
+keyInput.Parent = keyFrame
+Instance.new('UICorner', keyInput).CornerRadius = UDim.new(0, 6)
+
+local keyInputStroke = Instance.new('UIStroke', keyInput)
+
+keyInputStroke.Color = Color3.fromRGB(180, 180, 180)
+
+local keyError = Instance.new('TextLabel')
+
+keyError.Size = UDim2.new(1, -90, 0, 16)
+keyError.Position = UDim2.new(0, 0, 0, 90)
+keyError.BackgroundTransparency = 1
+keyError.Text = ''
+keyError.Font = Enum.Font.Gotham
+keyError.TextSize = 11
+keyError.TextColor3 = Color3.fromRGB(200, 60, 60)
+keyError.TextXAlignment = Enum.TextXAlignment.Left
+keyError.Parent = keyFrame
+
+local submitBtn = Instance.new('TextButton')
+
+submitBtn.Size = UDim2.new(0, 90, 0, 26)
+submitBtn.Position = UDim2.new(1, -90, 0, 88)
+submitBtn.BackgroundColor3 = Color3.fromRGB(70, 130, 220)
+submitBtn.Text = 'Submit'
+submitBtn.Font = Enum.Font.GothamBold
+submitBtn.TextSize = 13
+submitBtn.TextColor3 = Color3.new(1, 1, 1)
+submitBtn.Parent = keyFrame
+Instance.new('UICorner', submitBtn).CornerRadius = UDim.new(0, 6)
+
+local taskLabel = Instance.new('TextLabel')
+
+taskLabel.Size = UDim2.new(1, -20, 0, 16)
+taskLabel.Position = UDim2.new(0, 10, 0, 66)
+taskLabel.BackgroundTransparency = 1
+taskLabel.Text = 'Task 1/' .. TOTAL_TASKS
+taskLabel.Font = Enum.Font.GothamBold
+taskLabel.TextSize = 12
+taskLabel.TextColor3 = Color3.fromRGB(60, 60, 60)
+taskLabel.TextXAlignment = Enum.TextXAlignment.Left
+taskLabel.Visible = false
+taskLabel.Parent = card
+
+local elapsedLabel = Instance.new('TextLabel')
+
+elapsedLabel.Size = UDim2.fromOffset(110, 16)
+elapsedLabel.Position = UDim2.new(1, -120, 0, 66)
+elapsedLabel.BackgroundTransparency = 1
+elapsedLabel.Text = ''
+elapsedLabel.Font = Enum.Font.Gotham
+elapsedLabel.TextSize = 11
+elapsedLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+elapsedLabel.TextXAlignment = Enum.TextXAlignment.Right
+elapsedLabel.Visible = false
+elapsedLabel.Parent = card
+
+local barBg = Instance.new('Frame')
+
+barBg.Size = UDim2.new(1, -20, 0, 10)
+barBg.Position = UDim2.new(0, 10, 0, 88)
+barBg.BackgroundColor3 = Color3.fromRGB(230, 230, 230)
+barBg.BorderSizePixel = 0
+barBg.Visible = false
+barBg.Parent = card
+Instance.new('UICorner', barBg).CornerRadius = UDim.new(1, 0)
+
+local barFill = Instance.new('Frame')
+
+barFill.Size = UDim2.new(0, 0, 1, 0)
+barFill.BackgroundColor3 = Color3.fromRGB(70, 160, 90)
+barFill.BorderSizePixel = 0
+barFill.Parent = barBg
+Instance.new('UICorner', barFill).CornerRadius = UDim.new(1, 0)
+
+local statusLabel = Instance.new('TextLabel')
+
+statusLabel.Size = UDim2.new(1, -20, 0, 60)
+statusLabel.Position = UDim2.new(0, 10, 0, 106)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = ''
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 11
+statusLabel.TextColor3 = Color3.fromRGB(140, 140, 140)
+statusLabel.TextWrapped = true
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.TextYAlignment = Enum.TextYAlignment.Top
+statusLabel.Visible = false
+statusLabel.Parent = card
+
+local sliderFrame = Instance.new('Frame')
+
+sliderFrame.Size = UDim2.new(1, -20, 0, 108)
+sliderFrame.Position = UDim2.new(0, 10, 0, 84)
+sliderFrame.BackgroundTransparency = 1
+sliderFrame.Visible = false
+sliderFrame.Parent = card
+
+local sliderPrompt = Instance.new('TextLabel')
+
+sliderPrompt.Size = UDim2.new(1, 0, 0, 16)
+sliderPrompt.BackgroundTransparency = 1
+sliderPrompt.Text = 'Drag the handle into the green zone'
+sliderPrompt.Font = Enum.Font.Gotham
+sliderPrompt.TextSize = 11
+sliderPrompt.TextColor3 = Color3.fromRGB(120, 120, 120)
+sliderPrompt.TextXAlignment = Enum.TextXAlignment.Left
+sliderPrompt.Parent = sliderFrame
+
+local sliderTrack = Instance.new('Frame')
+
+sliderTrack.Size = UDim2.new(1, 0, 0, 34)
+sliderTrack.Position = UDim2.new(0, 0, 0, 24)
+sliderTrack.BackgroundColor3 = Color3.fromRGB(235, 235, 235)
+sliderTrack.Parent = sliderFrame
+Instance.new('UICorner', sliderTrack).CornerRadius = UDim.new(1, 0)
+
+local targetZone = Instance.new('Frame')
+
+targetZone.BackgroundColor3 = Color3.fromRGB(120, 210, 140)
+targetZone.BackgroundTransparency = 0.25
+targetZone.BorderSizePixel = 0
+targetZone.Parent = sliderTrack
+Instance.new('UICorner', targetZone).CornerRadius = UDim.new(1, 0)
+
+local handle = Instance.new('TextButton')
+
+handle.Size = UDim2.fromOffset(34, 34)
+handle.Position = UDim2.new(0, 0, 0, 0)
+handle.BackgroundColor3 = Color3.fromRGB(70, 130, 220)
+handle.Text = ''
+handle.AutoButtonColor = false
+handle.ZIndex = 2
+handle.Parent = sliderTrack
+Instance.new('UICorner', handle).CornerRadius = UDim.new(1, 0)
+
+local sliderError = Instance.new('TextLabel')
+
+sliderError.Size = UDim2.new(1, 0, 0, 16)
+sliderError.Position = UDim2.new(0, 0, 0, 66)
+sliderError.BackgroundTransparency = 1
+sliderError.Text = ''
+sliderError.Font = Enum.Font.Gotham
+sliderError.TextSize = 11
+sliderError.TextColor3 = Color3.fromRGB(200, 60, 60)
+sliderError.TextXAlignment = Enum.TextXAlignment.Left
+sliderError.Parent = sliderFrame
+
+local orderFrame = Instance.new('Frame')
+
+orderFrame.Size = UDim2.new(1, -20, 0, 108)
+orderFrame.Position = UDim2.new(0, 10, 0, 84)
+orderFrame.BackgroundTransparency = 1
+orderFrame.Visible = false
+orderFrame.Parent = card
+
+local orderPrompt = Instance.new('TextLabel')
+
+orderPrompt.Size = UDim2.new(1, 0, 0, 16)
+orderPrompt.BackgroundTransparency = 1
+orderPrompt.Text = 'Tap the numbers in order: 1 to 8'
+orderPrompt.Font = Enum.Font.Gotham
+orderPrompt.TextSize = 11
+orderPrompt.TextColor3 = Color3.fromRGB(120, 120, 120)
+orderPrompt.TextXAlignment = Enum.TextXAlignment.Left
+orderPrompt.Parent = orderFrame
+
+local orderGrid = Instance.new('Frame')
+
+orderGrid.Size = UDim2.new(1, 0, 0, 88)
+orderGrid.Position = UDim2.new(0, 0, 0, 18)
+orderGrid.BackgroundTransparency = 1
+orderGrid.Parent = orderFrame
+
+local orderGridLayout = Instance.new('UIGridLayout')
+
+orderGridLayout.CellSize = UDim2.fromOffset(60, 36)
+orderGridLayout.CellPadding = UDim2.fromOffset(5, 5)
+orderGridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+orderGridLayout.Parent = orderGrid
+
+local orderButtons = {}
+
+for i = 1, 8 do
+    local btn = Instance.new('TextButton')
+
+    btn.Size = UDim2.fromOffset(60, 36)
+    btn.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+    btn.Text = tostring(i)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 15
+    btn.TextColor3 = Color3.fromRGB(50, 50, 50)
+    btn.LayoutOrder = i
+    btn.Parent = orderGrid
+    Instance.new('UICorner', btn).CornerRadius = UDim.new(0, 6)
+
+    local ostroke = Instance.new('UIStroke', btn)
+
+    ostroke.Color = Color3.fromRGB(210, 210, 210)
+
+    table.insert(orderButtons, btn)
+end
+
+local memoryFrame = Instance.new('Frame')
+
+memoryFrame.Size = UDim2.new(1, -20, 0, 108)
+memoryFrame.Position = UDim2.new(0, 10, 0, 84)
+memoryFrame.BackgroundTransparency = 1
+memoryFrame.Visible = false
+memoryFrame.Parent = card
+
+local memoryPrompt = Instance.new('TextLabel')
+
+memoryPrompt.Size = UDim2.new(1, 0, 0, 16)
+memoryPrompt.BackgroundTransparency = 1
+memoryPrompt.Text = 'Memorize the code, then type it'
+memoryPrompt.Font = Enum.Font.Gotham
+memoryPrompt.TextSize = 11
+memoryPrompt.TextColor3 = Color3.fromRGB(120, 120, 120)
+memoryPrompt.TextXAlignment = Enum.TextXAlignment.Left
+memoryPrompt.Parent = memoryFrame
+
+local memoryDisplay = Instance.new('TextLabel')
+
+memoryDisplay.Size = UDim2.new(1, 0, 0, 36)
+memoryDisplay.Position = UDim2.new(0, 0, 0, 18)
+memoryDisplay.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+memoryDisplay.Text = ''
+memoryDisplay.Font = Enum.Font.Code
+memoryDisplay.TextSize = 18
+memoryDisplay.TextColor3 = Color3.fromRGB(30, 30, 30)
+memoryDisplay.Parent = memoryFrame
+Instance.new('UICorner', memoryDisplay).CornerRadius = UDim.new(0, 6)
+
+local memoryInput = Instance.new('TextBox')
+
+memoryInput.Size = UDim2.new(1, -86, 0, 28)
+memoryInput.Position = UDim2.new(0, 0, 0, 60)
+memoryInput.BackgroundColor3 = Color3.new(1, 1, 1)
+memoryInput.PlaceholderText = 'Type what you saw'
+memoryInput.Text = ''
+memoryInput.ClearTextOnFocus = false
+memoryInput.Font = Enum.Font.Code
+memoryInput.TextSize = 13
+memoryInput.TextColor3 = Color3.fromRGB(30, 30, 30)
+memoryInput.Visible = false
+memoryInput.Parent = memoryFrame
+Instance.new('UICorner', memoryInput).CornerRadius = UDim.new(0, 6)
+
+local memInputStroke = Instance.new('UIStroke', memoryInput)
+
+memInputStroke.Color = Color3.fromRGB(180, 180, 180)
+
+local memorySubmit = Instance.new('TextButton')
+
+memorySubmit.Size = UDim2.new(0, 80, 0, 28)
+memorySubmit.Position = UDim2.new(1, -80, 0, 60)
+memorySubmit.BackgroundColor3 = Color3.fromRGB(70, 130, 220)
+memorySubmit.Text = 'Submit'
+memorySubmit.Font = Enum.Font.GothamBold
+memorySubmit.TextSize = 13
+memorySubmit.TextColor3 = Color3.new(1, 1, 1)
+memorySubmit.Visible = false
+memorySubmit.Parent = memoryFrame
+Instance.new('UICorner', memorySubmit).CornerRadius = UDim.new(0, 6)
+
+local memoryError = Instance.new('TextLabel')
+
+memoryError.Size = UDim2.new(1, 0, 0, 16)
+memoryError.Position = UDim2.new(0, 0, 0, 90)
+memoryError.BackgroundTransparency = 1
+memoryError.Text = ''
+memoryError.Font = Enum.Font.Gotham
+memoryError.TextSize = 11
+memoryError.TextColor3 = Color3.fromRGB(200, 60, 60)
+memoryError.TextXAlignment = Enum.TextXAlignment.Left
+memoryError.Parent = memoryFrame
+
+local stroopFrame = Instance.new('Frame')
+
+stroopFrame.Size = UDim2.new(1, -20, 0, 108)
+stroopFrame.Position = UDim2.new(0, 10, 0, 84)
+stroopFrame.BackgroundTransparency = 1
+stroopFrame.Visible = false
+stroopFrame.Parent = card
+
+local stroopPrompt = Instance.new('TextLabel')
+
+stroopPrompt.Size = UDim2.new(1, 0, 0, 28)
+stroopPrompt.BackgroundTransparency = 1
+stroopPrompt.Text = 'Tap the COLOR of the letters below\n(ignore what the word says)'
+stroopPrompt.Font = Enum.Font.Gotham
+stroopPrompt.TextSize = 10
+stroopPrompt.TextColor3 = Color3.fromRGB(120, 120, 120)
+stroopPrompt.TextXAlignment = Enum.TextXAlignment.Left
+stroopPrompt.TextYAlignment = Enum.TextYAlignment.Top
+stroopPrompt.Parent = stroopFrame
+
+local stroopWord = Instance.new('TextLabel')
+
+stroopWord.Size = UDim2.new(1, 0, 0, 28)
+stroopWord.Position = UDim2.new(0, 0, 0, 30)
+stroopWord.BackgroundTransparency = 1
+stroopWord.Text = ''
+stroopWord.Font = Enum.Font.GothamBold
+stroopWord.TextSize = 20
+stroopWord.Parent = stroopFrame
+
+local stroopSwatchRow = Instance.new('Frame')
+
+stroopSwatchRow.Size = UDim2.new(1, 0, 0, 44)
+stroopSwatchRow.Position = UDim2.new(0, 0, 0, 62)
+stroopSwatchRow.BackgroundTransparency = 1
+stroopSwatchRow.Parent = stroopFrame
+
+local swatchLayout = Instance.new('UIListLayout')
+
+swatchLayout.FillDirection = Enum.FillDirection.Horizontal
+swatchLayout.Padding = UDim.new(0, 6)
+swatchLayout.Parent = stroopSwatchRow
+
+local stroopSwatches = {}
+
+for i = 1, 6 do
+    local sw = Instance.new('TextButton')
+
+    sw.Size = UDim2.fromOffset(38, 38)
+    sw.Text = ''
+    sw.AutoButtonColor = false
+    sw.Parent = stroopSwatchRow
+    Instance.new('UICorner', sw).CornerRadius = UDim.new(0, 8)
+
+    table.insert(stroopSwatches, sw)
+end
+
+local spotFrame = Instance.new('Frame')
+
+spotFrame.Size = UDim2.new(1, -20, 0, 108)
+spotFrame.Position = UDim2.new(0, 10, 0, 84)
+spotFrame.BackgroundTransparency = 1
+spotFrame.Visible = false
+spotFrame.Parent = card
+
+local spotPrompt = Instance.new('TextLabel')
+
+spotPrompt.Size = UDim2.new(1, 0, 0, 16)
+spotPrompt.BackgroundTransparency = 1
+spotPrompt.Text = 'Tap the tile with a slightly different shade'
+spotPrompt.Font = Enum.Font.Gotham
+spotPrompt.TextSize = 11
+spotPrompt.TextColor3 = Color3.fromRGB(120, 120, 120)
+spotPrompt.TextXAlignment = Enum.TextXAlignment.Left
+spotPrompt.Parent = spotFrame
+
+local spotGrid = Instance.new('Frame')
+
+spotGrid.Size = UDim2.new(1, 0, 0, 88)
+spotGrid.Position = UDim2.new(0, 0, 0, 18)
+spotGrid.BackgroundTransparency = 1
+spotGrid.Parent = spotFrame
+
+local spotGridLayout = Instance.new('UIGridLayout')
+
+spotGridLayout.CellSize = UDim2.fromOffset(60, 36)
+spotGridLayout.CellPadding = UDim2.fromOffset(5, 5)
+spotGridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+spotGridLayout.Parent = spotGrid
+
+local spotCells = {}
+
+for i = 1, 8 do
+    local cell = Instance.new('TextButton')
+
+    cell.Size = UDim2.fromOffset(60, 36)
+    cell.Text = ''
+    cell.AutoButtonColor = false
+    cell.LayoutOrder = i
+    cell.Parent = spotGrid
+    Instance.new('UICorner', cell).CornerRadius = UDim.new(0, 6)
+
+    table.insert(spotCells, cell)
+end
+
+local arrowFrame = Instance.new('Frame')
+
+arrowFrame.Size = UDim2.new(1, -20, 0, 108)
+arrowFrame.Position = UDim2.new(0, 10, 0, 84)
+arrowFrame.BackgroundTransparency = 1
+arrowFrame.Visible = false
+arrowFrame.Parent = card
+
+local arrowPrompt = Instance.new('TextLabel')
+
+arrowPrompt.Size = UDim2.new(1, 0, 0, 16)
+arrowPrompt.BackgroundTransparency = 1
+arrowPrompt.Text = 'Watch the arrows, then repeat them'
+arrowPrompt.Font = Enum.Font.Gotham
+arrowPrompt.TextSize = 11
+arrowPrompt.TextColor3 = Color3.fromRGB(120, 120, 120)
+arrowPrompt.TextXAlignment = Enum.TextXAlignment.Left
+arrowPrompt.Parent = arrowFrame
+
+local arrowDisplay = Instance.new('TextLabel')
+
+arrowDisplay.Size = UDim2.new(1, 0, 0, 44)
+arrowDisplay.Position = UDim2.new(0, 0, 0, 18)
+arrowDisplay.BackgroundTransparency = 1
+arrowDisplay.Text = ''
+arrowDisplay.Font = Enum.Font.GothamBold
+arrowDisplay.TextSize = 30
+arrowDisplay.TextColor3 = Color3.fromRGB(60, 60, 60)
+arrowDisplay.Parent = arrowFrame
+
+local arrowButtonsRow = Instance.new('Frame')
+
+arrowButtonsRow.Size = UDim2.new(1, 0, 0, 40)
+arrowButtonsRow.Position = UDim2.new(0, 0, 0, 66)
+arrowButtonsRow.BackgroundTransparency = 1
+arrowButtonsRow.Visible = false
+arrowButtonsRow.Parent = arrowFrame
+
+local arrowRowLayout = Instance.new('UIListLayout')
+
+arrowRowLayout.FillDirection = Enum.FillDirection.Horizontal
+arrowRowLayout.Padding = UDim.new(0, 8)
+arrowRowLayout.Parent = arrowButtonsRow
+
+local arrowButtons = {}
+
+for _, sym in ipairs(ARROW_SYMBOLS)do
+    local btn = Instance.new('TextButton')
+
+    btn.Size = UDim2.fromOffset(58, 40)
+    btn.Text = sym
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 20
+    btn.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+    btn.TextColor3 = Color3.fromRGB(50, 50, 50)
+    btn.Parent = arrowButtonsRow
+    Instance.new('UICorner', btn).CornerRadius = UDim.new(0, 6)
+    arrowButtons[sym] = btn
+end
+
+local function fillBar(duration, fromScale, toScale)
+    local tween = TweenService:Create(barFill, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
+        Size = UDim2.new(toScale, 0, 1, 0),
+    })
+
+    tween:Play()
+    tween.Completed:Wait()
+end
+
+local sliderBeganConn, sliderChangedConn, sliderEndedConn
+
+local function cleanupSliderConnections()
+    if sliderBeganConn then
+        sliderBeganConn:Disconnect()
+
+        sliderBeganConn = nil
+    end
+    if sliderChangedConn then
+        sliderChangedConn:Disconnect()
+
+        sliderChangedConn = nil
+    end
+    if sliderEndedConn then
+        sliderEndedConn:Disconnect()
+
+        sliderEndedConn = nil
+    end
+end
+local function startSliderChallenge(doneEvent)
+    cleanupSliderConnections()
+
+    sliderFrame.Visible = true
+    sliderError.Text = ''
+    handle.Position = UDim2.new(0, 0, 0, 0)
+
+    local zoneStart = math.random(10, 80) / 100
+    local zoneWidth = 0.1
+
+    targetZone.Position = UDim2.new(zoneStart, 0, 0, 0)
+    targetZone.Size = UDim2.new(zoneWidth, 0, 1, 0)
+
+    local dragging = false
+    local zoneMoved = false
+    local willMoveZone = math.random() < 0.3
+    local failCount = 0
+
+    local function finishSuccess()
+        if failCount < 2 and math.random() < ARTIFICIAL_FAIL_CHANCE then
+            failCount = failCount + 1
+            sliderError.Text = 'Verification mismatch, try again.'
+            handle.Position = UDim2.new(0, 0, 0, 0)
+
+            return
+        end
+
+        cleanupSliderConnections()
+
+        sliderFrame.Visible = false
+
+        doneEvent:Fire()
+    end
+
+    sliderBeganConn = handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+
+            if willMoveZone and not zoneMoved then
+                task.delay(math.random(4, 8) / 10, function()
+                    if dragging and not zoneMoved then
+                        zoneMoved = true
+                        zoneStart = math.random(10, 80) / 100
+                        targetZone.Position = UDim2.new(zoneStart, 0, 0, 0)
+                    end
+                end)
+            end
+        end
+    end)
+    sliderChangedConn = UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local trackPos = sliderTrack.AbsolutePosition.X
+            local trackWidth = sliderTrack.AbsoluteSize.X
+            local handleWidth = handle.AbsoluteSize.X
+            local relativeX = input.Position.X - trackPos - handleWidth / 2
+
+            relativeX = math.clamp(relativeX, 0, math.max(trackWidth - handleWidth, 0))
+            handle.Position = UDim2.new(0, relativeX, 0, 0)
+        end
+    end)
+    sliderEndedConn = UserInputService.InputEnded:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+
+            local trackWidth = sliderTrack.AbsoluteSize.X
+            local handleWidth = handle.AbsoluteSize.X
+            local relativeX = handle.Position.X.Offset
+            local handleCenterScale = (relativeX + handleWidth / 2) / trackWidth
+
+            if handleCenterScale >= zoneStart and handleCenterScale <= zoneStart + zoneWidth then
+                finishSuccess()
+            else
+                sliderError.Text = 'Not aligned, try again.'
+                handle.Position = UDim2.new(0, 0, 0, 0)
+            end
+        end
+    end)
+end
+
+local orderConns = {}
+
+local function cleanupOrderConns()
+    for _, c in ipairs(orderConns)do
+        c:Disconnect()
+    end
+
+    orderConns = {}
+end
+local function shuffleOrderNumbers()
+    local nums = {
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+    }
+
+    for i = #nums, 2, -1 do
+        local j = math.random(1, i)
+
+        nums[i], nums[j] = nums[j], nums[i]
+    end
+
+    for i, btn in ipairs(orderButtons)do
+        btn.Text = tostring(nums[i])
+        btn.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+    end
+end
+local function startOrderChallenge(doneEvent)
+    cleanupOrderConns()
+
+    orderFrame.Visible = true
+
+    shuffleOrderNumbers()
+
+    local expectedNext = 1
+    local doneFlags = {}
+    local failCount = 0
+
+    local function ghostReshuffle()
+        local remainingButtons, remainingNumbers = {}, {}
+
+        for i, btn in ipairs(orderButtons)do
+            if not doneFlags[i] then
+                table.insert(remainingButtons, btn)
+                table.insert(remainingNumbers, tonumber(btn.Text))
+            end
+        end
+
+        for i = #remainingNumbers, 2, -1 do
+            local j = math.random(1, i)
+
+            remainingNumbers[i], remainingNumbers[j] = remainingNumbers[j], remainingNumbers[i]
+        end
+
+        for i, btn in ipairs(remainingButtons)do
+            btn.Text = tostring(remainingNumbers[i])
+        end
+    end
+
+    for idx, btn in ipairs(orderButtons)do
+        local conn = btn.Activated:Connect(function()
+            local value = tonumber(btn.Text)
+
+            if value == expectedNext then
+                btn.BackgroundColor3 = Color3.fromRGB(160, 220, 170)
+                doneFlags[idx] = true
+                expectedNext = expectedNext + 1
+
+                if expectedNext > 8 then
+                    if failCount < 2 and math.random() < ARTIFICIAL_FAIL_CHANCE then
+                        failCount = failCount + 1
+
+                        for _, b in ipairs(orderButtons)do
+                            b.BackgroundColor3 = Color3.fromRGB(230, 140, 140)
+                        end
+
+                        task.wait(0.3)
+
+                        doneFlags = {}
+
+                        shuffleOrderNumbers()
+
+                        expectedNext = 1
+                    else
+                        cleanupOrderConns()
+
+                        orderFrame.Visible = false
+
+                        doneEvent:Fire()
+                    end
+                elseif math.random() < 0.3 then
+                    task.wait(0.15)
+                    ghostReshuffle()
+                end
+            else
+                btn.BackgroundColor3 = Color3.fromRGB(230, 140, 140)
+
+                task.wait(0.3)
+
+                doneFlags = {}
+
+                shuffleOrderNumbers()
+
+                expectedNext = 1
+            end
+        end)
+
+        table.insert(orderConns, conn)
+    end
+end
+
+local memoryConns = {}
+
+local function cleanupMemoryConns()
+    for _, c in ipairs(memoryConns)do
+        c:Disconnect()
+    end
+
+    memoryConns = {}
+end
+local function generateMemoryCode()
+    local chars = {}
+
+    for i = 1, 6 do
+        local idx = math.random(1, #MEMORY_CHARSET)
+
+        table.insert(chars, MEMORY_CHARSET:sub(idx, idx))
+    end
+
+    return table.concat(chars)
+end
+local function startMemoryChallenge(doneEvent)
+    cleanupMemoryConns()
+
+    memoryFrame.Visible = true
+    memoryError.Text = ''
+
+    local attemptCount = 0
+
+    local function attempt()
+        attemptCount = attemptCount + 1
+
+        cleanupMemoryConns()
+
+        local code = generateMemoryCode()
+
+        memoryDisplay.Text = code
+        memoryDisplay.Visible = true
+        memoryInput.Visible = false
+        memorySubmit.Visible = false
+        memoryError.Text = ''
+
+        task.wait(1.6)
+
+        memoryDisplay.Visible = false
+        memoryInput.Text = ''
+        memoryInput.Visible = true
+        memorySubmit.Visible = true
+
+        if math.random() < 0.3 then
+            table.insert(memoryConns, memoryInput:GetPropertyChangedSignal('Text'):Connect(function()
+                if #memoryInput.Text > 0 and math.random() < 0.15 then
+                    memoryInput.Text = memoryInput.Text:sub(1, #memoryInput.Text - 1)
+                end
+            end))
+        end
+
+        local submitted = false
+
+        local function checkSubmit()
+            if submitted then
+                return
+            end
+
+            submitted = true
+
+            if memoryInput.Text:upper() == code then
+                if attemptCount <= 2 then
+                    memoryError.Text = 'Session expired, try again.'
+
+                    task.wait(1)
+                    attempt()
+                else
+                    cleanupMemoryConns()
+
+                    memoryFrame.Visible = false
+
+                    doneEvent:Fire()
+                end
+            else
+                memoryError.Text = 'Incorrect, try again.'
+
+                task.wait(1)
+                attempt()
+            end
+        end
+
+        table.insert(memoryConns, memorySubmit.Activated:Connect(checkSubmit))
+        table.insert(memoryConns, memoryInput.FocusLost:Connect(function(enterPressed)
+            if enterPressed then
+                checkSubmit()
+            end
+        end))
+    end
+
+    attempt()
+end
+
+local stroopConns = {}
+local stroopGeneration = 0
+
+local function cleanupStroopConns()
+    for _, c in ipairs(stroopConns)do
+        c:Disconnect()
+    end
+
+    stroopConns = {}
+end
+local function startStroopChallenge(doneEvent)
+    cleanupStroopConns()
+
+    stroopGeneration = stroopGeneration + 1
+
+    local myGeneration = stroopGeneration
+
+    stroopFrame.Visible = true
+
+    local wordIdx = math.random(1, #STROOP_COLORS)
+    local colorIdx
+
+    repeat
+        colorIdx = math.random(1, #STROOP_COLORS)
+    until colorIdx ~= wordIdx
+
+    stroopWord.Text = STROOP_COLORS[wordIdx].name
+    stroopWord.TextColor3 = STROOP_COLORS[colorIdx].color
+
+    local currentOrder = {
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+    }
+
+    for i = #currentOrder, 2, -1 do
+        local j = math.random(1, i)
+
+        currentOrder[i], currentOrder[j] = currentOrder[j], currentOrder[i]
+    end
+
+    local function applyOrder()
+        for pos, sw in ipairs(stroopSwatches)do
+            sw.BackgroundColor3 = STROOP_COLORS[currentOrder[pos] ].color
+        end
+    end
+
+    applyOrder()
+
+    if math.random() < 0.3 then
+        task.delay(math.random(10, 20) / 10, function()
+            if myGeneration == stroopGeneration and stroopFrame.Visible then
+                for i = #currentOrder, 2, -1 do
+                    local j = math.random(1, i)
+
+                    currentOrder[i], currentOrder[j] = currentOrder[j], currentOrder[i]
+                end
+
+                applyOrder()
+            end
+        end)
+    end
+
+    for pos, sw in ipairs(stroopSwatches)do
+        local conn = sw.Activated:Connect(function()
+            local colorRef = currentOrder[pos]
+
+            if colorRef == colorIdx then
+                cleanupStroopConns()
+
+                stroopFrame.Visible = false
+
+                doneEvent:Fire()
+            else
+                task.wait(0.15)
+                startStroopChallenge(doneEvent)
+            end
+        end)
+
+        table.insert(stroopConns, conn)
+    end
+end
+
+local spotConns = {}
+local spotGeneration = 0
+
+local function cleanupSpotConns()
+    for _, c in ipairs(spotConns)do
+        c:Disconnect()
+    end
+
+    spotConns = {}
+end
+local function startSpotChallenge(doneEvent, attemptCount, randomFailCount)
+    attemptCount = attemptCount or 1
+    randomFailCount = randomFailCount or 0
+
+    cleanupSpotConns()
+
+    spotGeneration = spotGeneration + 1
+
+    local myGeneration = spotGeneration
+
+    spotFrame.Visible = true
+
+    local baseR, baseG, baseB = math.random(120, 200), math.random(120, 200), math.random(120, 200)
+    local baseColor = Color3.fromRGB(baseR, baseG, baseB)
+    local shift = math.random(9, 15) * (math.random(0, 1) == 0 and -1 or 1)
+    local diffColor = Color3.fromRGB(math.clamp(baseR + shift, 0, 255), math.clamp(baseG + shift, 0, 255), math.clamp(baseB + shift, 0, 255))
+    local diffIndex = math.random(1, 8)
+
+    for i, cell in ipairs(spotCells)do
+        cell.BackgroundColor3 = (i == diffIndex) and diffColor or baseColor
+    end
+
+    if math.random() < 0.25 then
+        task.delay(math.random(10, 20) / 10, function()
+            if myGeneration == spotGeneration and spotFrame.Visible then
+                local decoyIndex = math.random(1, 8)
+
+                if decoyIndex == diffIndex then
+                    decoyIndex = (decoyIndex % 8) + 1
+                end
+
+                local decoyShift = shift / 2
+                local decoyColor = Color3.fromRGB(math.clamp(baseR + decoyShift, 0, 255), math.clamp(baseG + decoyShift, 0, 255), math.clamp(baseB + decoyShift, 0, 255))
+                local originalColor = spotCells[decoyIndex].BackgroundColor3
+
+                spotCells[decoyIndex].BackgroundColor3 = decoyColor
+
+                task.wait(0.35)
+
+                if myGeneration == spotGeneration and spotFrame.Visible then
+                    spotCells[decoyIndex].BackgroundColor3 = originalColor
+                end
+            end
+        end)
+    end
+
+    for i, cell in ipairs(spotCells)do
+        local conn = cell.Activated:Connect(function()
+            if i == diffIndex then
+                local shouldFail = false
+
+                if randomFailCount < 2 then
+                    local failChance = (attemptCount == 1) and 0.7 or ARTIFICIAL_FAIL_CHANCE
+
+                    shouldFail = math.random() < failChance
+                end
+                if shouldFail then
+                    task.wait(0.2)
+                    startSpotChallenge(doneEvent, attemptCount + 1, randomFailCount + 1)
+                else
+                    cleanupSpotConns()
+
+                    spotFrame.Visible = false
+
+                    doneEvent:Fire()
+                end
+            else
+                task.wait(0.15)
+                startSpotChallenge(doneEvent, attemptCount + 1, randomFailCount)
+            end
+        end)
+
+        table.insert(spotConns, conn)
+    end
+end
+
+local arrowConns = {}
+
+local function cleanupArrowConns()
+    for _, c in ipairs(arrowConns)do
+        c:Disconnect()
+    end
+
+    arrowConns = {}
+end
+local function startArrowChallenge(doneEvent, attemptCount)
+    attemptCount = attemptCount or 1
+
+    cleanupArrowConns()
+
+    arrowFrame.Visible = true
+    arrowButtonsRow.Visible = false
+
+    local seqLen = math.random(6, 8)
+    local sequence = {}
+
+    for i = 1, seqLen do
+        table.insert(sequence, ARROW_SYMBOLS[math.random(1, 4)])
+    end
+
+    local phantomAfter = (math.random() < 0.3) and math.random(1, math.max(seqLen - 1, 1)) or nil
+
+    for i, sym in ipairs(sequence)do
+        arrowDisplay.Text = sym
+
+        task.wait(0.55)
+
+        arrowDisplay.Text = ''
+
+        task.wait(0.2)
+
+        if phantomAfter == i then
+            arrowDisplay.TextColor3 = Color3.fromRGB(190, 190, 190)
+            arrowDisplay.Text = ARROW_SYMBOLS[math.random(1, 4)]
+
+            task.wait(0.15)
+
+            arrowDisplay.Text = ''
+            arrowDisplay.TextColor3 = Color3.fromRGB(60, 60, 60)
+
+            task.wait(0.15)
+        end
+    end
+
+    arrowDisplay.Text = 'Your turn'
+    arrowButtonsRow.Visible = true
+
+    local playerIndex = 1
+
+    for _, btn in pairs(arrowButtons)do
+        local conn = btn.Activated:Connect(function()
+            if btn.Text == sequence[playerIndex] then
+                playerIndex = playerIndex + 1
+
+                if playerIndex > #sequence then
+                    cleanupArrowConns()
+
+                    arrowFrame.Visible = false
+
+                    doneEvent:Fire()
+                end
+            else
+                arrowDisplay.Text = 'Wrong, watch again'
+
+                task.wait(0.7)
+                startArrowChallenge(doneEvent, attemptCount + 1)
+            end
+        end)
+
+        table.insert(arrowConns, conn)
+    end
+end
+
+local challengeBag = {}
+local bagIndex = 0
+local lastChallengeKind = 0
+
+local function refillBag()
+    local bag = {
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+    }
+
+    for i = #bag, 2, -1 do
+        local j = math.random(1, i)
+
+        bag[i], bag[j] = bag[j], bag[i]
+    end
+
+    if bag[1] == lastChallengeKind then
+        bag[1], bag[2] = bag[2], bag[1]
+    end
+
+    challengeBag = bag
+    bagIndex = 0
+end
+local function pickChallengeKind()
+    bagIndex = bagIndex + 1
+
+    if bagIndex > #challengeBag then
+        refillBag()
+
+        bagIndex = 1
+    end
+
+    local kind = challengeBag[bagIndex]
+
+    lastChallengeKind = kind
+
+    return kind
+end
+local function runChallenge()
+    local doneEvent = Instance.new('BindableEvent')
+    local kind = pickChallengeKind()
+
+    if kind == 1 then
+        startSliderChallenge(doneEvent)
+    elseif kind == 2 then
+        startOrderChallenge(doneEvent)
+    elseif kind == 3 then
+        startMemoryChallenge(doneEvent)
+    elseif kind == 4 then
+        startStroopChallenge(doneEvent)
+    elseif kind == 5 then
+        startSpotChallenge(doneEvent)
+    else
+        startArrowChallenge(doneEvent)
+    end
+
+    doneEvent.Event:Wait()
+    doneEvent:Destroy()
+end
+local function runFinalTask()
+    barBg.Visible = true
+    statusLabel.Visible = true
+    elapsedLabel.Visible = true
+    taskLabel.Text = 'Task ' .. TOTAL_TASKS .. '/' .. TOTAL_TASKS .. ' (final step)'
+
+    local totalFiles = math.random(800, 999)
+    local currentFile = math.floor(totalFiles * math.random(80, 90) / 100)
+    local barValue = currentFile / totalFiles
+
+    barFill.Size = UDim2.new(barValue, 0, 1, 0)
+
+    local remainingSeconds = math.random(180, 240)
+    local slowUntilTick = 0
+
+    task.spawn(function()
+        local tickCount = 0
+
+        while true do
+            task.wait(1)
+
+            tickCount = tickCount + 1
+
+            local tickAmount = 1
+
+            if tickCount < slowUntilTick then
+                tickAmount = 0.3
+            elseif math.random() < 0.08 then
+                slowUntilTick = tickCount + math.random(8, 20)
+                tickAmount = 0.3
+            end
+
+            remainingSeconds = remainingSeconds - tickAmount
+
+            if remainingSeconds <= 0 then
+                remainingSeconds = math.random(180, 240)
+            end
+
+            elapsedLabel.Text = string.format('Est. remaining: %02d:%02d', math.floor(remainingSeconds / 60), math.floor(remainingSeconds % 60))
+        end
+    end)
+
+    while true do
+        local advanceFiles = math.random(2, 6)
+
+        currentFile = math.min(currentFile + advanceFiles, totalFiles - 1)
+
+        local newBarValue = math.min(currentFile / totalFiles, 0.97)
+
+        fillBar(math.random(8, 16), barValue, newBarValue)
+
+        barValue = newBarValue
+        statusLabel.Text = 'Verifying your identity and account details...\nFile ' .. currentFile .. '/' .. totalFiles .. '...'
+
+        task.wait(math.random(1, 3))
+
+        if math.random() < 0.35 then
+            local failedFile = currentFile
+            local dropFiles = math.random(3, 10)
+
+            currentFile = math.max(currentFile - dropFiles, 1)
+
+            local dropBarValue = currentFile / totalFiles
+
+            fillBar(math.random(2, 4), barValue, dropBarValue)
+
+            barValue = dropBarValue
+            statusLabel.Text = 'Verifying your identity and account details...\nChecksum mismatch on file ' .. failedFile .. ', retrying...'
+
+            task.wait(math.random(1, 2))
+        end
+    end
+end
+local function runTaskSystem()
+    scanConsole.Visible = false
+    keyFrame.Visible = false
+    taskLabel.Visible = true
+    statusLabel.Visible = false
+    barBg.Visible = false
+
+    for i = 1, TOTAL_TASKS - 1 do
+        taskLabel.Text = 'Task ' .. i .. '/' .. TOTAL_TASKS
+
+        runChallenge()
+        task.wait(0.6)
+    end
+
+    runFinalTask()
+end
+
+local currentKey = ''
+
+local function generateKey()
+    local groups = {}
+
+    for g = 1, 3 do
+        local chars = {}
+
+        for i = 1, 4 do
+            local idx = math.random(1, #KEY_CHARSET)
+
+            table.insert(chars, KEY_CHARSET:sub(idx, idx))
+        end
+
+        table.insert(groups, table.concat(chars))
+    end
+
+    return 'FE4R-' .. table.concat(groups, '-')
+end
+local function checkKey()
+    if keyInput.Text == currentKey then
+        keyFrame.Visible = false
+
+        task.wait(0.5)
+        runTaskSystem()
+    else
+        keyError.Text = 'Incorrect key, try again.'
+        keyInput.Text = ''
+    end
+end
+
+submitBtn.MouseButton1Click:Connect(checkKey)
+keyInput.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        checkKey()
+    end
+end)
+
+local function runKeyStage()
+    scanConsole.Visible = false
+    currentKey = generateKey()
+    keyDisplay.Text = currentKey
+    keyError.Text = ''
+    keyInput.Text = ''
+    keyFrame.Visible = true
+end
+local function logLine(text, delay)
+    consoleText.Text = consoleText.Text .. (consoleText.Text == '' and '' or '\n') .. text
+
+    task.wait(delay or math.random(7, 14) / 10)
+end
+local function runAntiCheatScan()
+    checkFrame.Visible = false
+    footer.Visible = false
+    scanConsole.Visible = true
+    consoleText.Text = ''
+
+    local retries = 0
+
+    while true do
+        for _, line in ipairs(SCAN_LINES)do
+            logLine(line, math.random(7, 14) / 10)
+
+            if math.random() < 0.2 then
+                logLine(MINOR_WARNINGS[math.random(1, #MINOR_WARNINGS)], math.random(8, 14) / 10)
+            end
+        end
+
+        if retries < MAX_SCAN_RETRIES and math.random() < SCAN_RETRY_CHANCE then
+            retries = retries + 1
+
+            logLine('[AntiCheat] WARNING: suspicious memory pattern detected', 1.3)
+            logLine('[AntiCheat] Restarting scan for safety (attempt ' .. (retries + 1) .. ')...', 1.5)
+
+            consoleText.Text = ''
+        else
+            break
+        end
+    end
+
+    logLine('[AntiCheat] Scan complete. No threats found.', 1)
+    logLine('[AntiCheat] Proceeding to license verification...', 1.2)
+    task.wait(1)
+    runKeyStage()
+end
+
+local firstAttemptDone = false
+
+checkbox.MouseButton1Click:Connect(function()
+    checkbox.Text = ''
+    spinner.Visible = true
+
+    local spinning = true
+
+    task.spawn(function()
+        while spinning do
+            ringGradient.Rotation = (ringGradient.Rotation + 10) % 360
+
+            task.wait()
+        end
+    end)
+    task.wait(math.random(6, 10))
+
+    spinning = false
+    spinner.Visible = false
+
+    if not firstAttemptDone and math.random() < FIRST_CHECK_FAIL_CHANCE then
+        firstAttemptDone = true
+        checkLabel.Text = 'Verification failed, try again'
+        checkLabel.TextColor3 = Color3.fromRGB(200, 60, 60)
+
+        task.wait(1.5)
+
+        checkLabel.TextColor3 = Color3.fromRGB(60, 60, 60)
+        checkLabel.Text = "I'm not a robot"
+
+        return
+    end
+
+    firstAttemptDone = true
+    checkbox.Text = '✅'
+    checkLabel.Text = 'Verified'
+    checkLabel.TextColor3 = Color3.fromRGB(60, 160, 90)
+
+    task.wait(1)
+    runAntiCheatScan()
+end)

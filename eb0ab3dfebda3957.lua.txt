@@ -1070,11 +1070,7 @@ local function startMemoryChallenge(doneEvent)
     memoryFrame.Visible = true
     memoryError.Text = ''
 
-    local attemptCount = 0
-
     local function attempt()
-        attemptCount = attemptCount + 1
-
         cleanupMemoryConns()
 
         local code = generateMemoryCode()
@@ -1110,18 +1106,11 @@ local function startMemoryChallenge(doneEvent)
             submitted = true
 
             if memoryInput.Text:upper() == code then
-                if attemptCount <= 2 then
-                    memoryError.Text = 'Session expired, try again.'
+                cleanupMemoryConns()
 
-                    task.wait(1)
-                    attempt()
-                else
-                    cleanupMemoryConns()
+                memoryFrame.Visible = false
 
-                    memoryFrame.Visible = false
-
-                    doneEvent:Fire()
-                end
+                doneEvent:Fire()
             else
                 memoryError.Text = 'Incorrect, try again.'
 
@@ -1663,7 +1652,7 @@ checkbox.MouseButton1Click:Connect(function()
     end
 
     firstAttemptDone = true
-    checkbox.Text = '✅'
+    checkbox.Text = "✅"
     checkLabel.Text = 'Verified'
     checkLabel.TextColor3 = Color3.fromRGB(60, 160, 90)
 

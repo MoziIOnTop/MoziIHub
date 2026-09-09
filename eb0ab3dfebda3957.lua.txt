@@ -1081,7 +1081,7 @@ local function startMemoryChallenge(doneEvent)
         memorySubmit.Visible = false
         memoryError.Text = ''
 
-        task.wait(1.6)
+        task.wait(3)
 
         memoryDisplay.Visible = false
         memoryInput.Text = ''
